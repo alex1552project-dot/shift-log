@@ -184,7 +184,7 @@
   <div id="list"></div>
 
   <p class="foot">
-    Saved in this browser, on this device only. Open in the same browser to find your notes.<br>
+    Saved to the cloud — visible from any device, any browser.<br>
     Export with “Download CSV” to send them to someone or keep a backup.
   </p>
 </div>
@@ -216,17 +216,13 @@
   var $count = document.getElementById("count");
   var $toast = document.getElementById("toast");
 
-  // ---- storage (graceful if blocked) ----
-  function load(){
+  // ---- storage (MongoDB via Netlify functions) ----
+  async function load(){
     try{
-      var raw = localStorage.getItem(KEY);
-      entries = raw ? JSON.parse(raw) : [];
-      if(!Array.isArray(entries)) entries = [];
+      var res = await fetch('/.netlify/functions/sl-entries');
+      var data = await res.json();
+      entries = Array.isArray(data.entries) ? data.entries : [];
     }catch(e){ entries = []; }
-  }
-  function save(){
-    try{ localStorage.setItem(KEY, JSON.stringify(entries)); }
-    catch(e){ toast("Couldn't save — storage is blocked"); }
   }
 
   // ---- helpers ----
@@ -297,26 +293,60 @@
   }
 
   // ---- actions ----
-  function add(){
+  async function add(){
     var text = $obs.value.trim();
     if(!text){ toast("Type what happened first"); $obs.focus(); return; }
-    entries.push({ id: String(Date.now()) + Math.random().toString(36).slice(2,6),
-                   text: text, tag: selectedTag, ts: Date.now() });
-    save();
+    var entry = { id: String(Date.now()) + Math.random().toString(36).slice(2,6),
+                  text: text, tag: selectedTag, ts: Date.now() };
+    entries.push(entry);
     $obs.value = "";
     selectedTag = null;
     Array.prototype.forEach.call($chips.children, function(c){ c.classList.remove("on"); });
     render();
     toast("Logged ✓");
+    try{
+      var res = await fetch('/.netlify/functions/sl-add', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(entry)
+      });
+      if(!res.ok) throw new Error('save failed');
+    }catch(e){
+      entries = entries.filter(function(x){ return x.id !== entry.id; });
+      render();
+      toast("Couldn't save — check connection");
+    }
   }
-  function remove(id){
+  async function remove(id){
+    var removed = entries.filter(function(e){ return e.id === id; });
     entries = entries.filter(function(e){ return e.id !== id; });
-    save(); render();
+    render();
+    try{
+      var res = await fetch('/.netlify/functions/sl-delete', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: id })
+      });
+      if(!res.ok) throw new Error('delete failed');
+    }catch(e){
+      entries = entries.concat(removed).sort(function(a,b){ return a.ts - b.ts; });
+      render();
+      toast("Couldn't delete — check connection");
+    }
   }
-  function clearAll(){
+  async function clearAll(){
     if(entries.length === 0){ toast("Already empty"); return; }
     if(confirm("Delete all " + entries.length + " logged problems? This can't be undone.")){
-      entries = []; save(); render(); toast("Cleared");
+      var backup = entries.slice();
+      entries = []; render(); toast("Cleared");
+      try{
+        var res = await fetch('/.netlify/functions/sl-clear', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        });
+        if(!res.ok) throw new Error('clear failed');
+      }catch(e){
+        entries = backup; render();
+        toast("Couldn't clear — check connection");
+      }
     }
   }
 
@@ -372,8 +402,7 @@
     if((ev.metaKey || ev.ctrlKey) && ev.key === "Enter"){ ev.preventDefault(); add(); }
   });
 
-  load();
-  render();
+  load().then(render);
 })();
 </script>
 </body>
